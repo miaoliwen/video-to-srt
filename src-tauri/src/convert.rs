@@ -100,9 +100,10 @@ fn table() -> &'static HashMap<&'static str, &'static str> {
 pub fn t2s(input: &str) -> String {
     let t = table();
     let mut out = String::with_capacity(input.len());
+    let mut buf = [0u8; 4];
     for ch in input.chars() {
-        let key: String = ch.to_string();
-        match t.get(key.as_str()) {
+        let key = ch.encode_utf8(&mut buf);
+        match t.get(key) {
             Some(simp) => out.push_str(simp),
             None => out.push(ch),
         }
