@@ -76,8 +76,15 @@ export default function App() {
   useEffect(() => {
     const un = listen<ProgressEvent>("pipeline-progress", (e) => {
       const ev = e.payload;
-      if (ev.progress != null) setProgress(ev.progress);
-      if (typeof ev.stage === "string") setStage(ev.stage as Stage);
+      if (ev.progress != null && Number.isFinite(ev.progress)) {
+        setProgress(Math.min(1, Math.max(0, ev.progress)));
+      }
+      if (typeof ev.stage === "string") {
+        const validStages: Stage[] = ["idle", "extracting", "transcribing", "done", "error"];
+        if (validStages.includes(ev.stage as Stage)) {
+          setStage(ev.stage as Stage);
+        }
+      }
       setLog((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${ev.message}`]);
     });
     return () => { un.then((f) => f()); };
@@ -151,8 +158,8 @@ export default function App() {
 
       const tx = await invoke<{ segments: Segment[]; srt: string }>("transcribe", {
         audioPath: ext.audio_path,
-        backend: settings.backend,
-        apiKey,
+        backend: settings.backend === "local" ? "local" : "cloud",
+        apiKey: settings.backend === "local" ? null : (apiKey || null),
         model: settings.model,
         language: settings.backend === "qwen" ? (settings.language.trim() || null) : null,
         enableItn: settings.enableItn,

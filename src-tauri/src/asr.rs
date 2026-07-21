@@ -2,6 +2,7 @@ use base64::Engine;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
 
 const DASHSCOPE_BASE: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
@@ -121,6 +122,16 @@ pub async fn transcribe_file(
         return Err(AsrError::MissingApiKey);
     }
     let model = model.unwrap_or(DEFAULT_MODEL).to_string();
+
+    // Guard against OOM: reject files larger than 50 MB
+    const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024;
+    let metadata = tokio::fs::metadata(audio_path).await?;
+    if metadata.len() > MAX_FILE_SIZE {
+        return Err(AsrError::Invalid(format!(
+            "音频文件过大 ({} MB)，最大支持 50 MB。请先压缩或分段处理。",
+            metadata.len() / (1024 * 1024)
+        )));
+    }
 
     let bytes = tokio::fs::read(audio_path).await?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -276,7 +287,13 @@ pub async fn transcribe_local(
         .unwrap_or("audio")
         .to_string();
     let out_dir = std::env::temp_dir();
-    let out_base = out_dir.join(format!("whisper_out_{}", stem));
+    // Use PID + nanoseconds to avoid collisions between concurrent runs
+    let pid = std::process::id();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let out_base = out_dir.join(format!("whisper_out_{}_{}_{}", stem, pid, ts));
 
     // Build args. `--no-prints` keeps stderr/stdout minimal; `-osrt` writes SRT.
     let mut args: Vec<String> = vec![
@@ -295,14 +312,18 @@ pub async fn transcribe_local(
     }
 
     let exe_path = cfg.exe.clone();
-    let output = tokio::task::spawn_blocking(move || -> Result<std::process::Output, AsrError> {
-        std::process::Command::new(&exe_path)
-            .args(&args)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .map_err(|e| AsrError::Local(format!("启动 whisper-cli 失败: {}", e)))
-    })
+    let output = tokio::time::timeout(
+        Duration::from_secs(300), // 5-minute timeout for local transcription
+        tokio::task::spawn_blocking(move || -> Result<std::process::Output, AsrError> {
+            std::process::Command::new(&exe_path)
+                .args(&args)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .map_err(|e| AsrError::Local(format!("启动 whisper-cli 失败: {}", e)))
+        }),
+    )
     .await
+    .map_err(|_| AsrError::Local("whisper-cli 执行超时（5分钟），可能被卡死，请检查模型和音频文件".into()))?
     .map_err(|e| AsrError::Local(format!("whisper-cli 任务异常: {}", e)))??;
 
     if !output.status.success() {

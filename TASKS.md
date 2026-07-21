@@ -33,10 +33,45 @@
   - 重点：测试覆盖完整性、边界情况
 - [ ] 审查 `src-tauri/tauri.conf.json` — Tauri权限配置
   - 重点：权限过度、危险权限暴露
-- [ ] 审查 `src-tauri/capabilities/default.json` — 能力声明
-  - 重点：最小权限原则、安全边界
+- [x] 审查 `src-tauri/src/lib.rs` — Tauri命令注册、管线编排、事件发射
+  - BLOCKER(1): backend非法值自动云端回退（隐私泄露）
+  - HIGH(2): 任意路径写入、音频输出静默覆盖
+  - MEDIUM(4): 时长探测错误被吞、进度事件竞态、temp_dir隐式回退、emit静默失败
+- [x] 审查 `src-tauri/src/asr.rs` — 双后端ASR
+  - HIGH(3): 临时文件竞态、子进程无超时、整文件base64加载OOM
+  - MEDIUM(6): 错误信息隐私泄露、unwrap panic路径、输出内存压力、清理不完整、空格未校验、language无白名单
+- [x] 审查 `src-tauri/src/srt.rs` — SRT格式化和等分时间戳
+  - HIGH(2): 异常片段覆写全部时间戳、NaN/Inf静默流入
+  - MEDIUM(4): 负时间钳制、超大时长饱和、无CRLF、单调性无保证
+- [x] 审查 `src-tauri/src/ffmpeg.rs` — ffmpeg定位与调用
+  - HIGH(2): PATH回退可被二进制劫持（ffmpeg+ffprobe）
+  - MEDIUM(3): output全量缓存、无超时控制、ffprobe_x64未尝试
+- [x] 审查 `src/App.tsx` — 主界面、管线调用
+  - HIGH(1): 事件payload未校验导致状态污染
+  - MEDIUM(4): 事件未绑定任务实例、本地模式传apiKey、多处异步无try-catch、拖拽无校验
+- [x] 审查 `src-tauri/src/convert.rs` + `src/store.ts` + `tauri.conf.json`
+  - BLOCKER(1): csp:null完全关闭CSP
+  - HIGH(2): API Key明文前端可读、无加密存储
+  - MEDIUM(3): ASR设置无校验、convert缺高频字、缺Unicode规范化
 
 ### 潜在问题追踪
 
-<!-- 发现的问题记录在这里，格式：- [问题描述] (严重程度) -->
+<!-- 发现的问题已汇总到 REVIEW_SUMMARY.md，核心问题如下 -->
+
+**BLOCKER:**
+- [lib.rs] backend非法值自动走云端 → 本地音频隐私泄露
+- [tauri.conf.json] csp:null 关闭CSP → XSS可串联API Key窃取+文件系统访问
+
+**HIGH（需优先修复）:**
+- [lib.rs] save_srt任意路径写入
+- [lib.rs] 音频输出静默覆盖
+- [asr.rs] 临时文件名可预测（并发竞态）
+- [asr.rs] whisper子进程无超时
+- [asr.rs] 整文件base64一次性加载OOM
+- [ffmpeg.rs] PATH回退可被二进制劫持
+- [App.tsx] 事件payload未校验
+- [store.ts] API Key明文且前端可读
+- [store.ts] settings.json明文持久化敏感信息
+
+<!-- 完整报告见 REVIEW_SUMMARY.md -->
 

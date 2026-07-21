@@ -15,7 +15,7 @@ pub enum FfmpegError {
 /// Locate the bundled ffmpeg.exe:
 /// 1. resource_path/binaries/<exe> (production bundle, beside app exe)
 /// 2. <exe>_x64.exe (Tauri sidecar convention)
-/// 3. PATH lookup
+/// 3. Dev-only PATH lookup (NOT used in production builds)
 pub fn locate_ffmpeg() -> Result<PathBuf, FfmpegError> {
     let exe_name = if cfg!(target_os = "windows") {
         "ffmpeg.exe"
@@ -56,7 +56,15 @@ pub fn locate_ffmpeg() -> Result<PathBuf, FfmpegError> {
         }
     }
 
-    which::which(exe_name).map_err(|_| FfmpegError::NotFound)
+    // PATH fallback: ONLY allowed in dev builds (when CARGO_MANIFEST_DIR is set).
+    // In production, this is disabled to prevent binary hijacking.
+    if std::env::var("CARGO_MANIFEST_DIR").is_ok() {
+        if let Ok(p) = which::which(exe_name) {
+            return Ok(p);
+        }
+    }
+
+    Err(FfmpegError::NotFound)
 }
 
 /// Extract mono 16kHz WAV audio from a media file to the given output path.
@@ -107,6 +115,11 @@ fn locate_ffprobe() -> Result<PathBuf, FfmpegError> {
     if let Ok(resource_dir) = std::env::var("TAURI_BUNDLE_RESOURCE_DIR") {
         let p = Path::new(&resource_dir).join("binaries").join(name);
         if p.exists() { return Ok(p); }
+        // Also try _x64 variant
+        let p2 = Path::new(&resource_dir)
+            .join("binaries")
+            .join(format!("{}_x64.exe", "ffprobe"));
+        if p2.exists() { return Ok(p2); }
     }
     if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
         let p = Path::new(&manifest).join("binaries").join(name);
@@ -116,5 +129,11 @@ fn locate_ffprobe() -> Result<PathBuf, FfmpegError> {
         let p = cwd.join("src-tauri").join("binaries").join(name);
         if p.exists() { return Ok(p); }
     }
-    which::which(name).map_err(|_| FfmpegError::NotFound)
+    // PATH fallback: ONLY in dev builds
+    if std::env::var("CARGO_MANIFEST_DIR").is_ok() {
+        if let Ok(p) = which::which(name) {
+            return Ok(p);
+        }
+    }
+    Err(FfmpegError::NotFound)
 }
