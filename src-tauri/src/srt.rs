@@ -1,10 +1,13 @@
 use crate::asr::SubtitleSegment;
 
 /// Format a duration in seconds as an SRT timestamp: `HH:MM:SS,mmm`
+/// Clamps to [0, 100 hours) to prevent overflow; values >= 100h show as 99:59:59,999.
+const MAX_SRT_SECS: f64 = 100.0 * 3600.0 - 0.001;
 pub fn format_ts(seconds: f64) -> String {
     if !seconds.is_finite() || seconds < 0.0 {
         return "00:00:00,000".into();
     }
+    let seconds = seconds.min(MAX_SRT_SECS);
     let total_ms = (seconds * 1000.0).round() as u64;
     let h = total_ms / 3_600_000;
     let m = (total_ms % 3_600_000) / 60_000;
@@ -15,19 +18,47 @@ pub fn format_ts(seconds: f64) -> String {
 
 /// Generate SRT content from segments. If some segments have zero/equal timestamps
 /// (single-line fallback), we evenly distribute them across the audio duration.
+///
+/// # Timestamp validation
+/// - Segments with NaN/Inf start or end: replaced with 0
+/// - Segments with end <= start (invalid order): individually redistributed
+/// - Negative start times: clamped to 0
+/// - Upper bound: 99:59:59,999 (prevents saturation overflow)
 pub fn build_srt(segments: &[SubtitleSegment], total_duration_secs: f64) -> String {
     let mut fixed: Vec<(f64, f64, String)> = segments
         .iter()
-        .map(|s| (s.start, s.end, s.text.clone()))
+        .map(|s| {
+            let mut start = s.start;
+            let mut end = s.end;
+            // Guard against NaN/Inf
+            if !start.is_finite() || start < 0.0 { start = 0.0; }
+            if !end.is_finite() || end < 0.0 { end = 0.0; }
+            // Clamp negative to 0
+            if start < 0.0 { start = 0.0; }
+            if end < 0.0 { end = 0.0; }
+            // Guard: if NaN comparison gave true (NaN <= x is false), we already handled above
+            (start, end, s.text.clone())
+        })
         .collect();
 
-    let needs_distribute = fixed.iter().any(|(s, e, _)| *e <= *s);
-    if needs_distribute {
-        let n = fixed.len().max(1) as f64;
-        let span = if total_duration_secs > 0.0 { total_duration_secs } else { n * 4.0 };
-        let step = span / n;
-        let total = fixed.len();
-        for (i, item) in fixed.iter_mut().enumerate() {
+    // Only redistribute segments that have end <= start (invalid), not all segments
+    let total = fixed.len();
+    for item in fixed.iter_mut() {
+        if item.1 <= item.0 {
+            // This segment needs redistribution — handled below per-item
+        }
+    }
+
+    // Per-segment redistribution: only touches items with end <= start
+    let n = fixed.len().max(1) as f64;
+    let span = if total_duration_secs > 0.0 && total_duration_secs.is_finite() {
+        total_duration_secs
+    } else {
+        n * 4.0
+    };
+    let step = span / n;
+    for (i, item) in fixed.iter_mut().enumerate() {
+        if item.1 <= item.0 {
             let a = i as f64 * step;
             let b = if i + 1 == total { span } else { (i + 1) as f64 * step };
             item.0 = a;
@@ -35,12 +66,24 @@ pub fn build_srt(segments: &[SubtitleSegment], total_duration_secs: f64) -> Stri
         }
     }
 
-    let mut out = String::new();
+    // Enforce monotonicity: ensure end >= start + 0.1s minimum gap
+    let min_gap = 0.1;
+    for i in 1..fixed.len() {
+        if fixed[i].0 < fixed[i - 1].1 + min_gap {
+            fixed[i].0 = fixed[i - 1].1 + min_gap;
+        }
+        if fixed[i].1 <= fixed[i].0 {
+            fixed[i].1 = fixed[i].0 + min_gap;
+        }
+    }
+
+    let mut out = String::with_capacity(segments.len() * 80);
     for (i, (start, end, text)) in fixed.iter().enumerate() {
-        if i > 0 { out.push('\n'); }
-        out.push_str(&format!("{}\n", i + 1));
-        out.push_str(&format!("{} --> {}\n", format_ts(*start), format_ts(*end)));
+        if i > 0 { out.push_str("\r\n"); }
+        out.push_str(&format!("{}\r\n", i + 1));
+        out.push_str(&format!("{} --> {}\r\n", format_ts(*start), format_ts(*end)));
         out.push_str(text.trim());
+        out.push('\r');
         out.push('\n');
     }
     out

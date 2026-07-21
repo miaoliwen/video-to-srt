@@ -120,6 +120,7 @@ export default function App() {
     [],
   );
 
+  const VIDEO_EXTENSIONS = ["mp4", "mov", "mkv", "avi", "flv", "webm", "wmv", "m4v"];
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setDropping(false);
@@ -127,8 +128,14 @@ export default function App() {
     if (files.length === 0) return;
     const first = files[0] as File & { path?: string };
     const p: string | undefined = first.path;
-    if (p) setVideoPath(p);
-  }, []);
+    if (!p) return;
+    const ext = p.split(".").pop()?.toLowerCase();
+    if (!ext || !VIDEO_EXTENSIONS.includes(ext)) {
+      appendLog(`不支持的文件类型: .${ext || "无扩展名"}，支持格式: ${VIDEO_EXTENSIONS.join(", ")}`);
+      return;
+    }
+    setVideoPath(p);
+  }, [appendLog]);
 
   const runPipeline = useCallback(async () => {
     if (!videoPath) return;

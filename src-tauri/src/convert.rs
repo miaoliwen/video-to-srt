@@ -8,8 +8,12 @@
 //! 实际 SRT 输出中 95%+ 的繁简差异场景。
 //!
 //! 对于表中没有收录的繁体字，保留原样不动 —— 简体本身一定不变。
+//!
+//! 额外应用 Unicode NFKC 归一化，将兼容区字符（全角数字、圈数字等）转换为
+//! 标准形式，防止 ASR 输出中此类字符导致显示/搜索异常。
 
 use std::collections::HashMap;
+use unicode_normalization::UnicodeNormalization;
 
 /// 精选繁→简映射（仅收录普通话 ASR 输出高频用字）。
 fn build_table() -> HashMap<&'static str, &'static str> {
@@ -92,7 +96,7 @@ fn table() -> &'static HashMap<&'static str, &'static str> {
 
 /// 把输入字符串中的繁体字逐字符映射为简体。
 /// 仅替换出现在映射表中的单字符；其他字符（ASCII、日韩文、未收录的繁体、
-/// 简体本身）保持不变。
+/// 简体本身）保持不变。最后应用 Unicode NFKC 归一化，消除兼容区字符差异。
 pub fn t2s(input: &str) -> String {
     let t = table();
     let mut out = String::with_capacity(input.len());
@@ -103,7 +107,9 @@ pub fn t2s(input: &str) -> String {
             None => out.push(ch),
         }
     }
-    out
+    // NFKC normalization: converts full-width digits, circled numbers,
+    // superscripts, and other compatibility characters to their standard forms.
+    out.nfkc().collect()
 }
 
 #[cfg(test)]

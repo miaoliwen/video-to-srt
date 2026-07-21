@@ -55,8 +55,17 @@ async fn extract_audio(app: AppHandle, video_path: String) -> Result<ExtractResu
             candidate
         }
     };
-    ffmpeg::extract_audio(&ffmpeg, &video_path, &out_path).map_err(|e| e.to_string())?;
-    let duration = ffmpeg::probe_duration(&out_path).unwrap_or(0.0);
+    ffmpeg::extract_audio(&ffmpeg, &video_path, &out_path).await.map_err(|e| e.to_string())?;
+    let out_path_for_probe = out_path.clone();
+    let duration = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::task::spawn_blocking(move || ffmpeg::probe_duration(&out_path_for_probe)),
+    )
+    .await
+    {
+        Ok(Ok(Some(d))) => d,
+        _ => 0.0,
+    };
     emit(&app, "extracting", "音频提取完成", Some(0.25));
     Ok(ExtractResult {
         audio_path: out_path.to_string_lossy().into_owned(),

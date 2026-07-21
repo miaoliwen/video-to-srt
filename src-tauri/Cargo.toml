@@ -25,6 +25,7 @@ tokio = { version = "1", features = ["full"] }
 base64 = "0.22"
 thiserror = "1"
 regex = "1"
+unicode-normalization = "0.1"
 anyhow = "1"
 which = "6"
 

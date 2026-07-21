@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -69,20 +70,34 @@ pub fn locate_ffmpeg() -> Result<PathBuf, FfmpegError> {
 
 /// Extract mono 16kHz WAV audio from a media file to the given output path.
 /// Uses PCM s16le for compact payload that ASR services love.
-pub fn extract_audio(ffmpeg: &Path, input: &Path, output: &Path) -> Result<(), FfmpegError> {
+/// Timeout: 5 minutes to prevent permanent blocking.
+pub async fn extract_audio(ffmpeg: &Path, input: &Path, output: &Path) -> Result<(), FfmpegError> {
     if let Some(parent) = output.parent() {
-        std::fs::create_dir_all(parent)?;
+        tokio::fs::create_dir_all(parent).await?;
     }
-    let status = Command::new(ffmpeg)
-        .arg("-y")
-        .arg("-i").arg(input)
-        .arg("-vn")
-        .arg("-ac").arg("1")
-        .arg("-ar").arg("16000")
-        .arg("-acodec").arg("pcm_s16le")
-        .arg("-f").arg("wav")
-        .arg(output)
-        .output()?;
+    let ffmpeg = ffmpeg.to_path_buf();
+    let input = input.to_path_buf();
+    let output = output.to_path_buf();
+
+    let status = tokio::time::timeout(
+        Duration::from_secs(300),
+        tokio::process::Command::new(&ffmpeg)
+            .arg("-y")
+            .arg("-i").arg(&input)
+            .arg("-vn")
+            .arg("-ac").arg("1")
+            .arg("-ar").arg("16000")
+            .arg("-acodec").arg("pcm_s16le")
+            .arg("-f").arg("wav")
+            .arg(&output)
+            .output(),
+    )
+    .await
+    .map_err(|_| FfmpegError::Failed {
+        code: None,
+        stderr: "ffmpeg 执行超时（5分钟），文件可能过大或已损坏".into(),
+    })?
+    .map_err(|e| FfmpegError::Failed { code: None, stderr: e.to_string() })?;
 
     if status.status.success() {
         Ok(())

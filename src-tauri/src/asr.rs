@@ -118,7 +118,7 @@ pub async fn transcribe_file(
     language: Option<&str>,
     enable_itn: bool,
 ) -> Result<Vec<SubtitleSegment>, AsrError> {
-    if api_key.is_empty() {
+    if api_key.trim().is_empty() {
         return Err(AsrError::MissingApiKey);
     }
     let model = model.unwrap_or(DEFAULT_MODEL).to_string();
@@ -357,7 +357,7 @@ pub async fn transcribe_local(
 fn parse_srt(text: &str) -> Vec<SubtitleSegment> {
     let text = text.trim_start_matches('\u{feff}');
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-    let ts_re = Regex::new(r"(?m)^(\d+):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*(\d+):(\d{2}):(\d{2})[,.](\d{1,3})").unwrap();
+    let ts_re = srt_ts_re();
 
     let mut out = Vec::new();
     for block in normalized.split("\n\n") {
@@ -392,6 +392,14 @@ fn parse_srt(text: &str) -> Vec<SubtitleSegment> {
         out.push(SubtitleSegment { start, end, text: body });
     }
     out
+}
+
+static SRT_TS_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+fn srt_ts_re() -> &'static Regex {
+    SRT_TS_RE.get_or_init(|| {
+        Regex::new(r"(?m)^(\d+):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*(\d+):(\d{2}):(\d{2})[,.](\d{1,3})")
+            .expect("hardcoded SRT timestamp regex must be valid")
+    })
 }
 
 fn hmsf_to_secs(h: &str, m: &str, s: &str, ms: &str) -> f64 {
