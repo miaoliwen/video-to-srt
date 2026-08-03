@@ -39,6 +39,7 @@ src-tauri/
   src/encoding_tests.rs  中文 UTF-8 BOM 往返测试
   binaries/           ffmpeg.exe / ffprobe.exe（打包资源）
   capabilities/       Tauri 权限声明
+docs/audit/           代码审查归档报告（历史参考，非 active TODO）
 ```
 
 约定：
@@ -46,9 +47,13 @@ src-tauri/
 - 前端进度通过 Tauri event `pipeline-progress` 推送，不轮询。
 - SRT 导出始终带 UTF-8 BOM（save_srt 命令 + 前端 Blob 下载均加 BOM）。
 - 繁简转换在 transcribe 命令内、build_srt 之前执行。
+- 编辑器规范由根目录 `.editorconfig` 统一：UTF-8、LF、文件末尾换行、通用 2 空格缩进，Rust/TOML 4 空格。
+- 格式化/检查脚本：`npm run typecheck`、`npm run fmt:rust`、`npm run lint:rust`、`npm run test:rust`。
+- 暂未提交 `rustfmt.toml`：现有 Rust 代码与 rustfmt 默认风格存在约 750 行差异，避免与业务改动混在一起。若要统一格式，请单独提一个纯格式化 commit。
 
 ## 当前状态与下一步
 
 - v0.1.0 功能完整：双后端 ASR、拖拽上传、进度条、字幕预览、导出/下载。
-- 无 git 仓库（尚未 `git init`）。
+- git 仓库已初始化，主分支 `main`。
+- 已完成一次对抗式代码审查，发现 45 个问题（2 BLOCKER / 10 HIGH），报告见 `docs/audit/REVIEW_SUMMARY.md`，BLOCKER 与 HIGH 尚待修复。
 - 潜在改进：Qwen 云端目前无真实时间戳（等分兜底），可考虑换用带时间戳的 ASR 模型或 API 参数；打包体积优化（FFmpeg 占 ~330MB）。

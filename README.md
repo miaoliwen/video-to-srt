@@ -64,9 +64,16 @@ npm run tauri build
 
 ```
 .
+├── .editorconfig              # 编辑器统一规范（缩进/换行/编码）
+├── LICENSE                    # MIT
+├── README.md
+├── AGENTS.md                  # 开发约定与架构说明
 ├── index.html
 ├── package.json
 ├── vite.config.ts
+├── tsconfig.json
+├── docs/
+│   └── audit/                 # 代码审查归档报告（历史参考）
 ├── src/                       # 前端 (React + Tailwind)
 │   ├── App.tsx
 │   ├── main.tsx
@@ -86,6 +93,17 @@ npm run tauri build
         ├── srt.rs             # SRT 拼接、时间格式与等分时间戳
         └── encoding_tests.rs  # 中文 UTF-8 BOM 往返集成测试
 ```
+
+## 开发规范
+
+- 详细的架构说明与代码约定见 [`AGENTS.md`](./AGENTS.md)。
+- 编辑器规范由 `.editorconfig` 统一（UTF-8 / LF / 通用 2 空格，Rust 与 TOML 4 空格）。
+- 常用脚本：
+  - `npm run typecheck` — 仅做 TypeScript 类型检查（`tsc --noEmit`）
+  - `npm run fmt:rust` — 用 rustfmt 格式化 Rust 代码
+  - `npm run lint:rust` — 运行 clippy 静态检查
+  - `npm run test:rust` — 运行 Rust 单元/集成测试
+- 本项目基于 [MIT License](./LICENSE) 开源。
 
 ## 备注
 

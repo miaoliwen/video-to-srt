@@ -22,4 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-agent_logs/
+# Environment
+.env
+.env.local
+*.tsbuildinfo
