@@ -43,7 +43,7 @@ audio.wav
 ## 配置 API Key
 
 首次运行点击右上角"⚙ 设置"，填入阿里云百炼 API Key（`sk-...`）。
-密钥仅写入本机 `settings.json`，不会外发。
+密钥保存在 Windows 凭据管理器（Credential Manager），不会写入前端可读的配置文件，也不会外发。
 
 ## 开发
 

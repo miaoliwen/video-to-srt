@@ -174,11 +174,26 @@ pub async fn transcribe_file(
     let status = resp.status();
     let text = resp.text().await?;
     if !status.is_success() {
-        return Err(AsrError::Api { code: status.to_string(), message: text });
+        // Don't echo the raw body back to the frontend — a 200 body is the
+        // full transcript and even error bodies can echo request content.
+        // Extract only a short, structured summary when the body is JSON
+        // (DashScope/OpenAI error shape: {"error": {"message": ...}}).
+        let summary = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| {
+                v.pointer("/error/message")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.chars().take(300).collect::<String>())
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "请求失败，请检查 API Key 与网络后重试".to_string());
+        return Err(AsrError::Api { code: status.to_string(), message: summary });
     }
 
-    let parsed: ChatResponse = serde_json::from_str(&text)
-        .map_err(|e| AsrError::Invalid(format!("json: {}; raw={}", e, text.chars().take(400).collect::<String>())))?;
+    // Parse failure on a 2xx response: don't include the raw body (it is the
+    // transcription of the user's audio — potentially sensitive).
+    let parsed: ChatResponse =
+        serde_json::from_str(&text).map_err(|_| AsrError::Invalid("无法解析识别响应（响应格式异常）".into()))?;
 
     let content = parsed
         .choices
@@ -312,25 +327,40 @@ pub async fn transcribe_local(
     }
 
     let exe_path = cfg.exe.clone();
-    let output = tokio::time::timeout(
-        Duration::from_secs(300), // 5-minute timeout for local transcription
-        tokio::task::spawn_blocking(move || -> Result<std::process::Output, AsrError> {
-            std::process::Command::new(&exe_path)
-                .args(&args)
-                .stdin(std::process::Stdio::null())
-                .output()
-                .map_err(|e| AsrError::Local(format!("启动 whisper-cli 失败: {}", e)))
-        }),
-    )
+    let srt_path: PathBuf = out_base.with_extension("srt");
+    // kill_on_drop(true): if the timeout fires, the future owning the child is
+    // dropped and tokio kills the process — a plain timeout on `output()`
+    // would leave whisper-cli running in the background.
+    let child = tokio::process::Command::new(&exe_path)
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| AsrError::Local(format!("启动 whisper-cli 失败: {}", e)))?;
+
+    let output = match tokio::time::timeout(Duration::from_secs(300), async {
+        child.wait_with_output().await
+    })
     .await
-    .map_err(|_| AsrError::Local("whisper-cli 执行超时（5分钟），可能被卡死，请检查模型和音频文件".into()))?
-    .map_err(|e| AsrError::Local(format!("whisper-cli 任务异常: {}", e)))??;
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => return Err(AsrError::Local(format!("whisper-cli 运行失败: {}", e))),
+        Err(_) => {
+            let _ = std::fs::remove_file(&srt_path);
+            return Err(AsrError::Local(
+                "whisper-cli 执行超时（5分钟），可能被卡死，请检查模型和音频文件".into(),
+            ));
+        }
+    };
 
     if !output.status.success() {
         let mut msg = String::from_utf8_lossy(&output.stderr).into_owned();
         if msg.is_empty() {
             msg = String::from_utf8_lossy(&output.stdout).into_owned();
         }
+        let _ = std::fs::remove_file(&srt_path);
         return Err(AsrError::Local(format!(
             "whisper-cli 退出码 {:?}: {}",
             output.status.code(),
@@ -339,7 +369,6 @@ pub async fn transcribe_local(
     }
 
     // whisper-cli writes "<out_base>.srt" — try that path first.
-    let srt_path: PathBuf = out_base.with_extension("srt");
     if !srt_path.exists() {
         return Err(AsrError::Local(format!(
             "未找到 whisper 生成的 SRT: {}",
@@ -354,7 +383,9 @@ pub async fn transcribe_local(
 
 /// Minimal SRT parser: tolerates blank lines, BOM, and CRLF; ignores the
 /// numeric cue index. Returns one `SubtitleSegment` per cue.
-fn parse_srt(text: &str) -> Vec<SubtitleSegment> {
+/// `pub(crate)` so the integration regression can exercise the real parse
+/// path; not part of the external API.
+pub(crate) fn parse_srt(text: &str) -> Vec<SubtitleSegment> {
     let text = text.trim_start_matches('\u{feff}');
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     let ts_re = srt_ts_re();
@@ -439,5 +470,58 @@ mod tests {
         assert!((cues[0].start - 0.0).abs() < 1e-6);
         assert!((cues[0].end - 2.5).abs() < 1e-6);
         assert_eq!(cues[1].text, "Next line.");
+    }
+
+    #[test]
+    fn parses_srt_with_bom_and_crlf() {
+        // whisper-cli writes UTF-8 BOM + CRLF on Windows; both must be handled.
+        let srt = "\u{feff}1\r\n00:00:00,000 --> 00:00:02,500\r\nHi.\r\n\r\n2\r\n00:00:02,600 --> 00:00:05,000\r\nNext.\r\n";
+        let cues = parse_srt(srt);
+        assert_eq!(cues.len(), 2);
+        assert!((cues[0].start - 0.0).abs() < 1e-6);
+        assert!((cues[0].end - 2.5).abs() < 1e-6);
+        assert_eq!(cues[0].text, "Hi.");
+        assert_eq!(cues[1].text, "Next.");
+    }
+
+    #[test]
+    fn empty_or_garbage_input_yields_no_cues() {
+        assert!(parse_srt("").is_empty());
+        assert!(parse_srt("  \n  ").is_empty());
+        assert!(parse_srt("hello world").is_empty());
+        // Timestamp but no body → skipped.
+        assert!(parse_srt("1\n00:00:00,000 --> 00:00:02,500\n").is_empty());
+    }
+
+    #[test]
+    fn malformed_blocks_are_skipped() {
+        let srt = "1\njust some text without timestamps\n\n2\n00:00:00,000 --> 00:00:01,000\nGood\n\n3\n";
+        let cues = parse_srt(srt);
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text, "Good");
+        assert!((cues[0].end - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn timestamp_fraction_digits_and_separators() {
+        // 3-digit ms: comma and dot separators both accepted.
+        assert!((hmsf_to_secs("0", "0", "1", "234") - 1.234).abs() < 1e-6);
+        assert!((hmsf_to_secs("0", "0", "1", "500") - 1.5).abs() < 1e-6);
+        // 2-digit and 1-digit fractions scale accordingly.
+        assert!((hmsf_to_secs("0", "0", "1", "23") - 1.23).abs() < 1e-6);
+        assert!((hmsf_to_secs("0", "0", "1", "2") - 1.2).abs() < 1e-6);
+        // Hours beyond 59 parse fine (SRT allows arbitrary hours).
+        assert!((hmsf_to_secs("1", "2", "3", "000") - 3723.0).abs() < 1e-6);
+        assert!((hmsf_to_secs("99", "59", "59", "999") - 359999.999).abs() < 1e-6);
+        // Empty fraction must not panic (regex prevents it, defensive only).
+        assert!((hmsf_to_secs("0", "0", "1", "") - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn multi_line_cue_body_is_preserved() {
+        let srt = "1\n00:00:00,000 --> 00:00:02,000\nfirst line\nsecond line\n";
+        let cues = parse_srt(srt);
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text, "first line\nsecond line");
     }
 }

@@ -41,15 +41,8 @@ pub fn build_srt(segments: &[SubtitleSegment], total_duration_secs: f64) -> Stri
         })
         .collect();
 
-    // Only redistribute segments that have end <= start (invalid), not all segments
-    let total = fixed.len();
-    for item in fixed.iter_mut() {
-        if item.1 <= item.0 {
-            // This segment needs redistribution — handled below per-item
-        }
-    }
-
     // Per-segment redistribution: only touches items with end <= start
+    let total = fixed.len();
     let n = fixed.len().max(1) as f64;
     let span = if total_duration_secs > 0.0 && total_duration_secs.is_finite() {
         total_duration_secs
@@ -127,5 +120,103 @@ mod tests {
         // Decoding as UTF-8 with BOM must yield original text (minus BOM).
         let text = std::str::from_utf8(&bytes).unwrap();
         assert!(text.contains("中文标点：，。！？"));
+    }
+
+    #[test]
+    fn empty_segments_produce_empty_srt() {
+        assert_eq!(build_srt(&[], 0.0), "");
+        assert_eq!(build_srt(&[], 120.0), "");
+    }
+
+    #[test]
+    fn nan_or_infinite_timestamps_clamp_to_zero() {
+        // NaN start + Inf end both become 0.0 → invalid pair → redistributed
+        // across the full span.
+        let segs = vec![SubtitleSegment {
+            start: f64::NAN,
+            end: f64::INFINITY,
+            text: "x".into(),
+        }];
+        let srt = build_srt(&segs, 8.0);
+        assert!(srt.contains("00:00:00,000 --> 00:00:08,000"));
+
+        // Positive Inf alone is clamped; the pair then stays valid.
+        let segs = vec![SubtitleSegment {
+            start: f64::INFINITY,
+            end: 5.0,
+            text: "y".into(),
+        }];
+        let srt = build_srt(&segs, 0.0);
+        assert!(srt.contains("00:00:00,000 --> 00:00:05,000"));
+    }
+
+    #[test]
+    fn negative_timestamps_clamp_to_zero() {
+        let segs = vec![SubtitleSegment {
+            start: -3.0,
+            end: -1.0,
+            text: "neg".into(),
+        }];
+        // -3/-1 → 0/0 → invalid pair → redistributed over the span.
+        let srt = build_srt(&segs, 10.0);
+        assert!(srt.contains("00:00:00,000 --> 00:00:10,000"));
+    }
+
+    #[test]
+    fn only_invalid_segments_are_redistributed() {
+        let segs = vec![
+            SubtitleSegment { start: 0.0, end: 2.0, text: "valid".into() },
+            SubtitleSegment { start: 100.0, end: 50.0, text: "broken".into() },
+        ];
+        let srt = build_srt(&segs, 10.0);
+        // The valid cue keeps its own timestamps; only the broken one is
+        // redistributed into the [5,10) slice of the span.
+        assert!(srt.contains("00:00:00,000 --> 00:00:02,000"));
+        assert!(srt.contains("00:00:05,000 --> 00:00:10,000"));
+        assert!(!srt.contains("00:01:40,000"));
+    }
+
+    #[test]
+    fn monotonicity_keeps_positive_gap_between_cues() {
+        let segs = vec![
+            SubtitleSegment { start: 0.0, end: 5.0, text: "a".into() },
+            SubtitleSegment { start: 0.0, end: 0.0, text: "b".into() },
+        ];
+        let srt = build_srt(&segs, 10.0);
+        // i=1 redistributed to start 5.0, but that collides with cue 1's end
+        // (5.0) → monotonicity pushes it to 5.1.
+        assert!(srt.contains("00:00:05,100 --> 00:00:10,000"));
+    }
+
+    #[test]
+    fn format_ts_clamps_at_100_hours() {
+        assert_eq!(format_ts(0.0), "00:00:00,000");
+        assert_eq!(format_ts(2.5), "00:00:02,500");
+        assert_eq!(format_ts(3600.0), "01:00:00,000");
+        // 100h and beyond saturate at the 99:59:59,999 cap.
+        assert_eq!(format_ts(100.0 * 3600.0), "99:59:59,999");
+        assert_eq!(format_ts(1e12), "99:59:59,999");
+        // Non-finite / negative inputs never reach formatting.
+        assert_eq!(format_ts(f64::NAN), "00:00:00,000");
+        assert_eq!(format_ts(f64::NEG_INFINITY), "00:00:00,000");
+        assert_eq!(format_ts(-1.0), "00:00:00,000");
+    }
+
+    #[test]
+    fn srt_uses_crlf_line_endings() {
+        let segs = vec![
+            SubtitleSegment { start: 0.0, end: 1.0, text: "a".into() },
+            SubtitleSegment { start: 1.1, end: 2.0, text: "b".into() },
+        ];
+        let srt = build_srt(&segs, 2.0);
+        // Every \n must be preceded by \r (CRLF, Windows-friendly).
+        for (i, ch) in srt.char_indices() {
+            if ch == '\n' {
+                assert!(i > 0 && srt.as_bytes()[i - 1] == b'\r', "lone \\n at byte {i}");
+            }
+        }
+        // Cue separator: text ends with CRLF, then a blank CRLF line before
+        // the next index.
+        assert!(srt.contains("a\r\n\r\n2\r\n"));
     }
 }

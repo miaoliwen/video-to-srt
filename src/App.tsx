@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { getApiKey, setApiKey, clearApiKey, getAsrSettings, setAsrSettings, type AsrSettings, type AsrBackend } from "./store";
+import { getAsrSettings, setAsrSettings, type AsrSettings, type AsrBackend } from "./store";
 
 type Stage = "idle" | "extracting" | "transcribing" | "done" | "error";
 
 interface ProgressEvent {
+  job_id?: string | null;
   stage: Stage | string;
   message: string;
   progress?: number | null;
@@ -26,8 +28,10 @@ const STAGE_LABEL: Record<string, string> = {
   error: "出错",
 };
 
+const VIDEO_EXTENSIONS = ["mp4", "mov", "mkv", "avi", "flv", "webm", "wmv", "m4v"];
+
 export default function App() {
-  const [apiKey, setApiKeyState] = useState<string>("");
+  const [hasApiKey, setHasApiKey] = useState<boolean>(false);
   const [settings, setSettings] = useState<AsrSettings>({
     backend: "qwen",
     language: "",
@@ -47,18 +51,21 @@ export default function App() {
   const [running, setRunning] = useState<boolean>(false);
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
   const [draftKey, setDraftKey] = useState<string>("");
-  const [keyVisible, setKeyVisible] = useState<boolean>(false);
   const [ffmpegPath, setFfmpegPath] = useState<string>("");
   const [dropping, setDropping] = useState<boolean>(false);
   const logRef = useRef<HTMLDivElement | null>(null);
+  // Id of the currently running pipeline; used to ignore stale events from
+  // earlier runs that may arrive late.
+  const jobIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     (async () => {
       try {
-        const k = await getApiKey();
-        setApiKeyState(k);
+        // Only a boolean is exposed — the key itself lives on the Rust side.
+        const k = await invoke<boolean>("get_has_api_key");
+        setHasApiKey(k);
       } catch (e) {
-        console.warn("load api key failed", e);
+        console.warn("load api key status failed", e);
       }
       try {
         const s = await getAsrSettings();
@@ -76,6 +83,8 @@ export default function App() {
   useEffect(() => {
     const un = listen<ProgressEvent>("pipeline-progress", (e) => {
       const ev = e.payload;
+      // Drop events from previous runs (they carry a different job_id).
+      if (ev.job_id != null && ev.job_id !== jobIdRef.current) return;
       if (ev.progress != null && Number.isFinite(ev.progress)) {
         setProgress(Math.min(1, Math.max(0, ev.progress)));
       }
@@ -102,9 +111,7 @@ export default function App() {
     const sel = await openDialog({
       multiple: false,
       title: "选择视频文件",
-      filters: [
-        { name: "视频", extensions: ["mp4", "mov", "mkv", "avi", "flv", "webm", "wmv", "m4v"] },
-      ],
+      filters: [{ name: "视频", extensions: VIDEO_EXTENSIONS }],
     });
     if (typeof sel === "string") setVideoPath(sel);
   }, []);
@@ -120,26 +127,40 @@ export default function App() {
     [],
   );
 
-  const VIDEO_EXTENSIONS = ["mp4", "mov", "mkv", "avi", "flv", "webm", "wmv", "m4v"];
-  const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setDropping(false);
-    const files = Array.from(e.dataTransfer.files || []);
-    if (files.length === 0) return;
-    const first = files[0] as File & { path?: string };
-    const p: string | undefined = first.path;
-    if (!p) return;
-    const ext = p.split(".").pop()?.toLowerCase();
-    if (!ext || !VIDEO_EXTENSIONS.includes(ext)) {
-      appendLog(`不支持的文件类型: .${ext || "无扩展名"}，支持格式: ${VIDEO_EXTENSIONS.join(", ")}`);
-      return;
-    }
-    setVideoPath(p);
+  // Tauri 2 removed the HTML5 `File.path` property, so drag-and-drop paths
+  // must come from the webview's native drag-drop event instead.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const p = event.payload;
+        if (p.type === "over") {
+          setDropping(true);
+        } else if (p.type === "leave") {
+          setDropping(false);
+        } else if (p.type === "drop") {
+          setDropping(false);
+          const path = p.paths[0];
+          if (!path) return;
+          const ext = path.split(".").pop()?.toLowerCase();
+          if (!ext || !VIDEO_EXTENSIONS.includes(ext)) {
+            appendLog(`不支持的文件类型: .${ext || "无扩展名"}，支持格式: ${VIDEO_EXTENSIONS.join(", ")}`);
+            return;
+          }
+          setVideoPath(path);
+        }
+      })
+      .then((f) => {
+        unlisten = f;
+      });
+    return () => {
+      unlisten?.();
+    };
   }, [appendLog]);
 
   const runPipeline = useCallback(async () => {
     if (!videoPath) return;
-    if (settings.backend === "qwen" && !apiKey) {
+    if (settings.backend === "qwen" && !hasApiKey) {
       setSettingsOpen(true);
       appendLog("请先在设置中填写 API Key");
       return;
@@ -155,10 +176,12 @@ export default function App() {
     }
     setRunning(true);
     setSegments([]); setSrt(""); setProgress(0); setLog([]); setStage("extracting");
+    const jobId = crypto.randomUUID();
+    jobIdRef.current = jobId;
     try {
       const ext = await invoke<{ audio_path: string; duration_secs: number }>(
         "extract_audio",
-        { videoPath },
+        { videoPath, jobId },
       );
       setDuration(ext.duration_secs);
       appendLog(`音频已生成: ${ext.audio_path}（${ext.duration_secs.toFixed(1)}s）`);
@@ -166,7 +189,6 @@ export default function App() {
       const tx = await invoke<{ segments: Segment[]; srt: string }>("transcribe", {
         audioPath: ext.audio_path,
         backend: settings.backend === "local" ? "local" : "cloud",
-        apiKey: settings.backend === "local" ? null : (apiKey || null),
         model: settings.model,
         language: settings.backend === "qwen" ? (settings.language.trim() || null) : null,
         enableItn: settings.enableItn,
@@ -174,6 +196,7 @@ export default function App() {
         whisperModel: settings.whisperModel || null,
         whisperLanguage: settings.whisperLanguage.trim() || null,
         totalDurationSecs: ext.duration_secs,
+        jobId,
       });
       setSegments(tx.segments);
       setSrt(tx.srt);
@@ -186,7 +209,7 @@ export default function App() {
     } finally {
       setRunning(false);
     }
-  }, [videoPath, apiKey, ffmpegPath, settings, appendLog]);
+  }, [videoPath, hasApiKey, ffmpegPath, settings, appendLog]);
 
   const exportSrt = useCallback(async () => {
     if (!srt) return;
@@ -230,8 +253,10 @@ export default function App() {
 
   const totalDurationLabel = useMemo(() => {
     if (!duration) return "—";
-    const mm = Math.floor(duration / 60);
-    const ss = Math.round(duration % 60);
+    // Round once at the second level so e.g. 59.6s shows "1m 0s", not "0m 60s".
+    const totalSecs = Math.round(duration);
+    const mm = Math.floor(totalSecs / 60);
+    const ss = totalSecs % 60;
     return `${mm}m ${ss}s`;
   }, [duration]);
 
@@ -249,7 +274,7 @@ export default function App() {
           <span className="text-xs text-white/40">{ffmpegPath ? "ffmpeg ✓" : "ffmpeg ✗"}</span>
           <button
             className="text-sm px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 border border-white/10"
-            onClick={() => { setDraftKey(apiKey); setSettingsOpen(true); }}
+            onClick={() => { setDraftKey(""); setSettingsOpen(true); }}
           >
             ⚙ 设置
           </button>
@@ -263,9 +288,6 @@ export default function App() {
               dropping ? "border-sky-400 bg-sky-400/10" : "border-white/15 bg-white/5 hover:bg-white/[0.07]"
             }`}
             onClick={chooseVideo}
-            onDragOver={(e) => { e.preventDefault(); setDropping(true); }}
-            onDragLeave={() => setDropping(false)}
-            onDrop={handleDrop}
           >
             <div className="text-sm text-white/60 mb-2">{videoPath ? "已选择视频：" : "拖入视频或点击选择文件"}</div>
             <div className="text-xs break-all font-mono text-white/80 bg-black/30 p-2 rounded max-h-24 overflow-auto">
@@ -391,20 +413,15 @@ export default function App() {
             {settings.backend === "qwen" ? (
               <>
                 <label className="block text-sm text-white/70 mb-1">阿里云百炼 API Key</label>
-                <div className="flex gap-2">
-                  <input
-                    type={keyVisible ? "text" : "password"}
-                    value={draftKey}
-                    onChange={(e) => setDraftKey(e.target.value)}
-                    placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
-                    className="flex-1 px-3 py-2 rounded bg-black/40 border border-white/10 focus:outline-none focus:border-sky-500 font-mono text-sm"
-                  />
-                  <button className="px-3 rounded bg-white/10 hover:bg-white/20 text-xs" onClick={() => setKeyVisible((v) => !v)}>
-                    {keyVisible ? "隐藏" : "显示"}
-                  </button>
-                </div>
+                <input
+                  type="password"
+                  value={draftKey}
+                  onChange={(e) => setDraftKey(e.target.value)}
+                  placeholder={hasApiKey ? "已配置密钥（留空保持不变）" : "sk-xxxxxxxxxxxxxxxxxxxxxxxx"}
+                  className="w-full px-3 py-2 rounded bg-black/40 border border-white/10 focus:outline-none focus:border-sky-500 font-mono text-sm"
+                />
                 <div className="text-xs text-white/50 mt-2">
-                  密钥仅保存在本机（{`%APPDATA%/字幕生成工作台/settings.json`}），不会上传任何服务器。
+                  密钥保存在 Windows 凭据管理器，且不回显到界面，不会上传任何服务器。
                 </div>
 
                 <div className="mt-4 grid grid-cols-2 gap-3">
@@ -479,7 +496,16 @@ export default function App() {
               {settings.backend === "qwen" && (
                 <button
                   className="px-3 py-2 rounded text-sm text-rose-300 hover:bg-rose-500/10"
-                  onClick={async () => { await clearApiKey(); setApiKeyState(""); setDraftKey(""); }}
+                  onClick={async () => {
+                    try {
+                      await invoke("clear_api_key");
+                      setHasApiKey(false);
+                      setDraftKey("");
+                      appendLog("已清除 API Key");
+                    } catch (e) {
+                      appendLog(`清除 API Key 失败: ${String(e)}`);
+                    }
+                  }}
                 >
                   清除密钥
                 </button>
@@ -489,12 +515,21 @@ export default function App() {
               <button
                 className="px-4 py-2 rounded bg-sky-500 hover:bg-sky-400 text-sm font-medium"
                 onClick={async () => {
-                  if (settings.backend === "qwen") {
-                    const k = draftKey.trim();
-                    await setApiKey(k);
-                    setApiKeyState(k);
+                  if (settings.backend === "qwen" && draftKey.trim()) {
+                    try {
+                      await invoke("set_api_key", { key: draftKey.trim() });
+                      setHasApiKey(true);
+                      appendLog("API Key 已保存");
+                    } catch (e) {
+                      appendLog(`保存 API Key 失败: ${String(e)}`);
+                    }
                   }
-                  await setAsrSettings(settings);
+                  try {
+                    await setAsrSettings(settings);
+                  } catch (e) {
+                    appendLog(`保存设置失败: ${String(e)}`);
+                  }
+                  setDraftKey("");
                   setSettingsOpen(false);
                 }}
               >
@@ -548,7 +583,9 @@ function PathRow({ value, onChange, onPick, placeholder }: PathRowProps) {
 
 function fmt(secs: number) {
   if (!isFinite(secs) || secs < 0) return "00:00.0";
-  const mm = Math.floor(secs / 60);
-  const ss = (secs - mm * 60);
+  // Round to tenths first so e.g. 59.96s shows "01:00.0", not "00:60.0".
+  const tenths = Math.round(secs * 10);
+  const mm = Math.floor(tenths / 600);
+  const ss = (tenths % 600) / 10;
   return `${String(mm).padStart(2, "0")}:${ss.toFixed(1).padStart(4, "0")}`;
 }

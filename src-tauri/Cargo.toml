@@ -26,7 +26,7 @@ base64 = "0.22"
 thiserror = "1"
 regex = "1"
 unicode-normalization = "0.1"
-anyhow = "1"
+keyring = { version = "3", features = ["windows-native"] }
 which = "6"
 
 [profile.release]

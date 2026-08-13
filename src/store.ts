@@ -9,23 +9,9 @@ export async function getStore(): Promise<Store> {
   return cached;
 }
 
-export async function getApiKey(): Promise<string> {
-  const store = await getStore();
-  const v = await store.get<string>("apiKey");
-  return v ?? "";
-}
-
-export async function setApiKey(key: string): Promise<void> {
-  const store = await getStore();
-  await store.set("apiKey", key);
-  await store.save();
-}
-
-export async function clearApiKey(): Promise<void> {
-  const store = await getStore();
-  await store.delete("apiKey");
-  await store.save();
-}
+// NOTE: the API key is intentionally NOT managed here. It lives on the Rust
+// side (`get_has_api_key` / `set_api_key` / `clear_api_key` commands) so the
+// frontend only ever sees whether one is configured, never the key itself.
 
 export type AsrBackend = "qwen" | "local";
 
@@ -44,7 +30,7 @@ const KEY = "asrSettings";
 export async function getAsrSettings(): Promise<AsrSettings> {
   const store = await getStore();
   const v = (await store.get<AsrSettings>(KEY)) ?? null;
-  return {
+  const merged = {
     backend: "qwen",
     language: "",
     enableItn: false,
@@ -53,6 +39,13 @@ export async function getAsrSettings(): Promise<AsrSettings> {
     whisperModel: "",
     whisperLanguage: "",
     ...(v ?? {}),
+  };
+  // Normalize a corrupted/tampered backend value: anything that isn't the
+  // literal "local" falls back to the default cloud backend, so the UI and
+  // the pipeline can never disagree about which backend is selected.
+  return {
+    ...merged,
+    backend: merged.backend === "local" ? "local" : "qwen",
   };
 }
 

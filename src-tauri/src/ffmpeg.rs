@@ -79,30 +79,50 @@ pub async fn extract_audio(ffmpeg: &Path, input: &Path, output: &Path) -> Result
     let input = input.to_path_buf();
     let output = output.to_path_buf();
 
-    let status = tokio::time::timeout(
-        Duration::from_secs(300),
-        tokio::process::Command::new(&ffmpeg)
-            .arg("-y")
-            .arg("-i").arg(&input)
-            .arg("-vn")
-            .arg("-ac").arg("1")
-            .arg("-ar").arg("16000")
-            .arg("-acodec").arg("pcm_s16le")
-            .arg("-f").arg("wav")
-            .arg(&output)
-            .output(),
-    )
+    // kill_on_drop(true): if the timeout fires, the future owning the child is
+    // dropped and tokio kills ffmpeg — a plain timeout on `output()` would
+    // leave it running and keep writing the output file.
+    let child = tokio::process::Command::new(&ffmpeg)
+        .arg("-y")
+        .arg("-i").arg(&input)
+        .arg("-vn")
+        .arg("-ac").arg("1")
+        .arg("-ar").arg("16000")
+        .arg("-acodec").arg("pcm_s16le")
+        .arg("-f").arg("wav")
+        .arg(&output)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| FfmpegError::Failed { code: None, stderr: e.to_string() })?;
+
+    let status = match tokio::time::timeout(Duration::from_secs(300), async {
+        child.wait_with_output().await
+    })
     .await
-    .map_err(|_| FfmpegError::Failed {
-        code: None,
-        stderr: "ffmpeg 执行超时（5分钟），文件可能过大或已损坏".into(),
-    })?
-    .map_err(|e| FfmpegError::Failed { code: None, stderr: e.to_string() })?;
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => {
+            return Err(FfmpegError::Failed { code: None, stderr: e.to_string() });
+        }
+        Err(_) => {
+            // Drop the partial output file ffmpeg may have written.
+            let _ = std::fs::remove_file(&output);
+            return Err(FfmpegError::Failed {
+                code: None,
+                stderr: "ffmpeg 执行超时（5分钟），文件可能过大或已损坏".into(),
+            });
+        }
+    };
 
     if status.status.success() {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&status.stderr).to_string();
+        // Remove the partial output file so it can't be mistaken for a valid
+        // extraction result later.
+        let _ = std::fs::remove_file(&output);
         Err(FfmpegError::Failed { code: status.status.code(), stderr })
     }
 }
