@@ -85,7 +85,8 @@ npm run tauri build
 ├── vite.config.ts
 ├── tsconfig.json
 ├── docs/
-│   └── audit/                 # 代码审查归档报告（历史参考）
+│   ├── audit/                 # 代码审查归档报告（历史参考）
+│   └── design/                # 设计文档（FFmpeg 双层架构等）
 ├── src/                       # 前端 (React + Tailwind)
 │   ├── App.tsx
 │   ├── main.tsx
