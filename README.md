@@ -2,6 +2,15 @@
 
 一个 Windows 桌面端应用：将视频自动拆分音频 → 调用 Qwen ASR 识别 → 生成带时间戳的 SRT 字幕文件 → 一键导出下载。
 
+## 功能特性
+
+- **双 ASR 后端**：阿里云百炼 Qwen ASR（云端，`qwen3-asr-flash`），或本地 whisper.cpp（完全离线）
+- **拖拽上传**：直接把视频拖进窗口即可开始处理
+- **自动繁→简转换**：精选高频字映射 + 上下文规则（乾/发/干 等多对一），修正多语言模型输出繁体的问题
+- **SRT 一键导出/下载**：UTF-8 BOM 编码，记事本与播放器均正常显示
+- **密钥安全**：API Key 保存在 Windows 凭据管理器，前端与配置文件均不可见，绝不外发
+- **稳健性**：子进程真实超时（kill）、临时文件自动清理、40 项单元/集成测试
+
 ## 技术栈
 
 | 层 | 技术 |
@@ -36,8 +45,9 @@ audio.wav
 
 1. 安装 Rust（[rustup.rs](https://rustup.rs)）。
 2. 安装 Node.js ≥ 18。
-3. 把 `ffmpeg.exe` 与 `ffprobe.exe` 放到 `src-tauri/binaries/` 目录（任意完整版 ≥ 5.0 即可）。
-   也可以选择发布时通过系统的 PATH 提供，但建议捆绑以便开箱即用。
+3. 下载 `ffmpeg.exe` 与 `ffprobe.exe`（任意完整版 ≥ 5.0，如 gyan.dev / BtbN 构建）放到 `src-tauri/binaries/` 目录。
+   > 这两个文件各约 166 MB，**不纳入 Git 仓库**（超过 GitHub 单文件 100 MB 上限，见 `src-tauri/.gitignore`），
+   > 克隆后需自行放置；打包时会被捆绑进安装包，开箱即用。
 4. （开发 Windows）安装 [Microsoft Visual Studio C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) 与 WebView2 Runtime。
 
 ## 配置 API Key
@@ -52,13 +62,14 @@ npm install
 npm run tauri dev
 ```
 
-## 打包
+## 打包与发布
 
 ```powershell
 npm run tauri build
 ```
 
-产物在 `src-tauri/target/release/bundle/` 下，NSIS (`.exe`) 与 MSI (`.msi`) 两种。
+产物为 NSIS 安装包：`src-tauri/target/release/bundle/nsis/字幕生成工作台_<版本>_x64-setup.exe`。
+正式版本可在 [Releases](https://github.com/miaoliwen/video-to-srt/releases) 页面下载。
 
 ## 目录速览
 
@@ -82,7 +93,7 @@ npm run tauri build
 └── src-tauri/
     ├── Cargo.toml
     ├── tauri.conf.json
-    ├── binaries/              # 放置 ffmpeg.exe / ffprobe.exe
+    ├── binaries/              # 放置 ffmpeg.exe / ffprobe.exe（不入库，见 .gitignore）
     ├── capabilities/default.json
     └── src/
         ├── main.rs
@@ -91,7 +102,8 @@ npm run tauri build
         ├── asr.rs             # Qwen ASR 云端 + 本地 Whisper.cpp 双后端
         ├── convert.rs         # 繁→简高频字映射（Whisper 多语言模型输出修正）
         ├── srt.rs             # SRT 拼接、时间格式与等分时间戳
-        └── encoding_tests.rs  # 中文 UTF-8 BOM 往返集成测试
+        ├── encoding_tests.rs  # 中文 UTF-8 BOM 往返集成测试
+        └── integration_tests.rs # 真实 SRT 语料集成回归
 ```
 
 ## 开发规范
@@ -103,6 +115,7 @@ npm run tauri build
   - `npm run fmt:rust` — 用 rustfmt 格式化 Rust 代码
   - `npm run lint:rust` — 运行 clippy 静态检查
   - `npm run test:rust` — 运行 Rust 单元/集成测试
+- 测试：40 项 Rust 单元/集成测试，覆盖凭据迁移链、SRT 边界（NaN/CRLF/100 小时上限）、真实 SRT 语料回归与繁简转换上下文规则。
 - 本项目基于 [MIT License](./LICENSE) 开源。
 
 ## 备注
