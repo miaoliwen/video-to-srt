@@ -45,9 +45,10 @@ audio.wav
 
 1. 安装 Rust（[rustup.rs](https://rustup.rs)）。
 2. 安装 Node.js ≥ 18。
-3. 下载 `ffmpeg.exe` 与 `ffprobe.exe`（任意完整版 ≥ 5.0，如 gyan.dev / BtbN 构建）放到 `src-tauri/binaries/` 目录。
-   > 这两个文件各约 166 MB，**不纳入 Git 仓库**（超过 GitHub 单文件 100 MB 上限，见 `src-tauri/.gitignore`），
-   > 克隆后需自行放置；打包时会被捆绑进安装包，开箱即用。
+3. 准备 `ffmpeg.exe` 与 `ffprobe.exe` 放到 `src-tauri/binaries/` 目录（**不纳入 Git 仓库**，见 `src-tauri/.gitignore`；打包时会被捆绑进安装包，开箱即用）：
+   - **推荐：精简版**（各约 3.3 MB，安装包仅 3 MB）——用仓库里的 [`build-ffmpeg-lite.sh`](./build-ffmpeg-lite.sh) 从 FFmpeg 源码构建（需 MinGW64 + Git Bash）；
+   - 或下载完整版（gyan.dev / BtbN，各约 166 MB）。
+   > 精简版覆盖 mp4/mov/mkv/webm/avi/flv 的常见音轨（AAC/MP3/Opus/Vorbis/FLAC/PCM，已实测），**不支持 WMV**（缺少 asf/wma 解码器）。
 4. （开发 Windows）安装 [Microsoft Visual Studio C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) 与 WebView2 Runtime。
 
 ## 配置 API Key
@@ -68,7 +69,7 @@ npm run tauri dev
 npm run tauri build
 ```
 
-产物为 NSIS 安装包：`src-tauri/target/release/bundle/nsis/字幕生成工作台_<版本>_x64-setup.exe`。
+产物为 NSIS 安装包：`src-tauri/target/release/bundle/nsis/字幕生成工作台_<版本>_x64-setup.exe`（搭配精简版 ffmpeg 时约 3 MB）。
 正式版本可在 [Releases](https://github.com/miaoliwen/video-to-srt/releases) 页面下载。
 
 ## 目录速览
