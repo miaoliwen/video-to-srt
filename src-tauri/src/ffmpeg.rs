@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -128,19 +127,31 @@ pub async fn extract_audio(ffmpeg: &Path, input: &Path, output: &Path) -> Result
 }
 
 /// Probe a media file and return its duration in seconds (best-effort).
-pub fn probe_duration(path: &Path) -> Option<f64> {
-    if let Ok(ffprobe) = locate_ffprobe() {
-        let out = Command::new(ffprobe)
-            .arg("-v").arg("error")
-            .arg("-show_entries").arg("format=duration")
-            .arg("-of").arg("default=noprint_wrappers=1:nokey=1")
-            .arg(path)
-            .output()
-            .ok()?;
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            return s.parse().ok();
-        }
+/// Uses `kill_on_drop(true)` + a 30s timeout so a hung ffprobe is actually
+/// killed — a plain timeout over a blocking `output()` (the previous
+/// spawn_blocking wrapper) would leave it running in the background.
+pub async fn probe_duration(path: &Path) -> Option<f64> {
+    let ffprobe = locate_ffprobe().ok()?;
+    let path = path.to_path_buf();
+    let child = tokio::process::Command::new(ffprobe)
+        .arg("-v").arg("error")
+        .arg("-show_entries").arg("format=duration")
+        .arg("-of").arg("default=noprint_wrappers=1:nokey=1")
+        .arg(&path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+    let output = tokio::time::timeout(Duration::from_secs(30), async {
+        child.wait_with_output().await
+    })
+    .await
+    .ok()?
+    .ok()?;
+    if output.status.success() {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return s.parse().ok();
     }
     None
 }

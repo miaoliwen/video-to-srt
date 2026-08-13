@@ -1,6 +1,6 @@
 # 代码审查归档 (2026-07-21 ~ 2026-08-13)
 
-本目录归档了两轮对抗式代码审查（adversarial review）的完整产物。
+本目录归档了三轮对抗式代码审查（adversarial review）的完整产物。
 
 ## 文件清单
 
@@ -17,6 +17,10 @@
 ### 第二轮（2026-08-13）
 
 - `REVIEW_ROUND2.md` — 25 个问题（1 BLOCKER / 3 HIGH / 6 MEDIUM / 15 LOW），含第一轮修复状态复核与回归发现
+
+### 第三轮（2026-08-13）
+
+- `REVIEW_ROUND3.md` — 复查 Round 2 修复引入的新问题：2 MEDIUM（transcribe 无条件删除任意路径、settings.json 明文密钥被 store 插件复活）+ 4 LOW/INFO
 
 ## 状态
 

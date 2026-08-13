@@ -128,11 +128,16 @@ export default function App() {
   );
 
   // Tauri 2 removed the HTML5 `File.path` property, so drag-and-drop paths
-  // must come from the webview's native drag-drop event instead.
+  // must come from the webview's native drag-drop event instead. The unlisten
+  // registration is async, so guard with a `cancelled` flag: under React 18
+  // StrictMode (dev) the cleanup runs before the registration resolves, and
+  // without the flag the first listener would be leaked → duplicate handlers.
   useEffect(() => {
+    let cancelled = false;
     let unlisten: (() => void) | undefined;
     getCurrentWebview()
       .onDragDropEvent((event) => {
+        if (cancelled) return;
         const p = event.payload;
         if (p.type === "over") {
           setDropping(true);
@@ -151,9 +156,14 @@ export default function App() {
         }
       })
       .then((f) => {
-        unlisten = f;
+        if (cancelled) {
+          f(); // Registration resolved after cleanup — unregister immediately.
+        } else {
+          unlisten = f;
+        }
       });
     return () => {
+      cancelled = true;
       unlisten?.();
     };
   }, [appendLog]);

@@ -29,6 +29,15 @@ const KEY = "asrSettings";
 
 export async function getAsrSettings(): Promise<AsrSettings> {
   const store = await getStore();
+  // One-time legacy cleanup: the pre-fix frontend stored the API key at the
+  // top level of settings.json via this same plugin, and the plugin
+  // serializes its WHOLE in-memory map back to disk on save. A Rust-side
+  // scrub of the file alone would be undone by the next settings save, so
+  // remove the key here — from both the plugin's memory and (via save) the
+  // file. No-op on installs that never had it.
+  if (await store.delete("apiKey")) {
+    await store.save();
+  }
   const v = (await store.get<AsrSettings>(KEY)) ?? null;
   const merged = {
     backend: "qwen",

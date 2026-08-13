@@ -79,16 +79,9 @@ async fn extract_audio(
         .join("video-to-srt")
         .join(format!("{}_16k_mono_{}_{}.wav", stem, pid, ts));
     ffmpeg::extract_audio(&ffmpeg, &video_path, &out_path).await.map_err(|e| e.to_string())?;
-    let out_path_for_probe = out_path.clone();
-    let duration = match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        tokio::task::spawn_blocking(move || ffmpeg::probe_duration(&out_path_for_probe)),
-    )
-    .await
-    {
-        Ok(Ok(Some(d))) => d,
-        _ => 0.0,
-    };
+    // The 30s timeout lives inside probe_duration (kill_on_drop), so a hung
+    // ffprobe is killed instead of being left running in the background.
+    let duration = ffmpeg::probe_duration(&out_path).await.unwrap_or(0.0);
     emit(&app, job_id.as_deref(), "extracting", "音频提取完成", Some(0.25));
     Ok(ExtractResult {
         audio_path: out_path.to_string_lossy().into_owned(),
@@ -270,6 +263,52 @@ fn clear_api_key(app: AppHandle) -> Result<(), String> {
     clear_api_key_with(&CredentialManagerStore, &dir)
 }
 
+/// Whether `path`'s canonicalized parent directory is the app's own temp
+/// subdirectory (`<temp>/video-to-srt`, where `extract_audio` writes the
+/// intermediate WAV). Used to constrain `transcribe`'s cleanup so it can
+/// never delete a caller-chosen path outside that directory.
+fn is_in_temp_subdir(path: &Path, expected_dir: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    match (parent.canonicalize(), expected_dir.canonicalize()) {
+        (Ok(actual), Ok(expected)) => actual == expected,
+        // Fail-safe: if either side can't be resolved (e.g. the temp dir
+        // doesn't exist), refuse to delete rather than risk a wrong path.
+        _ => false,
+    }
+}
+
+/// Best-effort cleanup of intermediate WAV files left behind by a crash
+/// (process killed between `extract_audio` and `transcribe`). Only removes
+/// files older than `max_age` so a concurrent run's fresh files are never
+/// touched; silently ignores any I/O error.
+fn cleanup_stale_temp_wavs_in(dir: &Path, max_age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        let stale = now
+            .duration_since(modified)
+            .map(|age| age > max_age)
+            // Clock skew / future mtime: treat as not stale, don't delete.
+            .unwrap_or(false);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 #[tauri::command]
 async fn transcribe(
     app: AppHandle,
@@ -350,9 +389,15 @@ async fn transcribe(
         )),
     };
 
-    // The intermediate WAV is owned by this pipeline run — delete it on every
-    // path so temp files don't accumulate.
-    let _ = tokio::fs::remove_file(&audio_path).await;
+    // The intermediate WAV is owned by this pipeline run and lives in the
+    // app's temp subdirectory — delete it on every path so temp files don't
+    // accumulate. Only delete files that actually live there: `audio_path`
+    // comes from the IPC caller, so an unverified delete would let any
+    // future caller destroy arbitrary files by pointing the path elsewhere.
+    // Fail-safe: if the path can't be verified, leave the file behind.
+    if is_in_temp_subdir(&audio_path, &std::env::temp_dir().join("video-to-srt")) {
+        let _ = tokio::fs::remove_file(&audio_path).await;
+    }
     let segments = segments_result?;
 
     emit(&app, job_id.as_deref(), "transcribing", format!("识别完成，共 {} 段", segments.len()), Some(0.85));
@@ -423,6 +468,12 @@ fn locate_ffmpeg_binary() -> Result<String, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Best-effort cleanup of intermediate WAVs left behind by a crash
+    // (process killed between extract_audio and transcribe).
+    cleanup_stale_temp_wavs_in(
+        &std::env::temp_dir().join("video-to-srt"),
+        std::time::Duration::from_secs(24 * 3600),
+    );
     // Build failures (e.g. bad config) must not panic — report and exit
     // cleanly instead of aborting via `panic = "abort"` with no message.
     match tauri::Builder::default()
@@ -654,5 +705,73 @@ mod tests {
             .unwrap()
             .contains("apiKey"));
         cleanup(&dir);
+    }
+
+    #[test]
+    fn delete_guard_accepts_only_app_temp_subdir() {
+        let base = temp_dir("delete_guard");
+        let app_tmp = base.join("video-to-srt");
+        std::fs::create_dir_all(&app_tmp).unwrap();
+
+        let inside = app_tmp.join("movie_16k_mono_1_2.wav");
+        std::fs::write(&inside, b"x").unwrap();
+        let outside = base.join("user-video.mp4");
+        std::fs::write(&outside, b"x").unwrap();
+
+        // A file really inside the app temp subdir is deletable.
+        assert!(is_in_temp_subdir(&inside, &app_tmp));
+        // Anything outside — even a sibling file — is not.
+        assert!(!is_in_temp_subdir(&outside, &app_tmp));
+        // Textual containment is not enough: `..` segments resolve outside.
+        let sneaky = app_tmp.join("..").join("..").join("user-video.mp4");
+        assert!(!is_in_temp_subdir(&sneaky, &app_tmp));
+        // The temp dir not existing (no extract_audio ran) → fail-safe false.
+        assert!(!is_in_temp_subdir(&base.join("missing").join("x.wav"), &app_tmp));
+        // No parent (bare file name) → not deletable.
+        assert!(!is_in_temp_subdir(Path::new("x.wav"), &app_tmp));
+
+        // The guard must actually protect the file: delete it only when the
+        // path is verified, and leave the outside file untouched.
+        if is_in_temp_subdir(&inside, &app_tmp) {
+            let _ = std::fs::remove_file(&inside);
+        }
+        if is_in_temp_subdir(&outside, &app_tmp) {
+            let _ = std::fs::remove_file(&outside);
+        }
+        assert!(!inside.exists());
+        assert!(outside.exists());
+
+        cleanup(&base);
+    }
+
+    #[test]
+    fn stale_temp_cleanup_removes_only_old_files() {
+        let base = temp_dir("stale_cleanup");
+        let app_tmp = base.join("video-to-srt");
+        std::fs::create_dir_all(&app_tmp).unwrap();
+
+        // A WAV left behind by a crash two days ago → should be removed.
+        let old = app_tmp.join("old_16k_mono_1_2.wav");
+        std::fs::write(&old, b"x").unwrap();
+        let backdated =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 3600);
+        // Need a write handle to set the mtime (read-only handles lack
+        // FILE_WRITE_ATTRIBUTES on Windows).
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(backdated)
+            .unwrap();
+
+        // A fresh file from a run that is still in progress → must survive.
+        let fresh = app_tmp.join("fresh_16k_mono_3_4.wav");
+        std::fs::write(&fresh, b"x").unwrap();
+
+        cleanup_stale_temp_wavs_in(&app_tmp, std::time::Duration::from_secs(24 * 3600));
+
+        assert!(!old.exists());
+        assert!(fresh.exists());
+        cleanup(&base);
     }
 }
